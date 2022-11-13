@@ -6,16 +6,18 @@ from epoch import epoch_time
 from blue import get_bleu
 
 # device
-device = device("cuda:0" if cuda.is_available() else "cpu")
+dv = device("cuda:0" if cuda.is_available() else "cpu")
 
 # optimizer parameter setting
+batch_size = 512
 factor = 0.9
-patience = 10
+patience = 5
 warmup = 100
-epoch = 1
+epoch = 100
 clip = 1.0
 weight_decay = 5e-4
 adam_eps = 5e-9
+init_lr = 0.1
 
 # Dataloader
 dl = dataloader()
@@ -23,13 +25,17 @@ source_size = len(dl.source_vocab)
 target_size = len(dl.target_vocab)
 padding_idx = dl.source_vocab['<sos>']
 
+def initialize_weights(m):
+    if hasattr(m, 'weight') and m.weight.dim() > 1:
+        nn.init.kaiming_uniform(m.weight.data)
+
 def train(model, train_data, optimizer, criterion, clip):
     model.train()
     epoch_loss = 0
-    train_data_len = len(list(train_data))
+    train_data_len = (train_data.dataset.num_lines + train_data.batch_size -1) // train_data.batch_size
     for i, batch in enumerate(train_data):
-        src = batch[0]
-        trg = batch[1]
+        src = batch[0].to(dv)
+        trg = batch[1].to(dv)
 
         optimizer.zero_grad()
         output = model(src, trg[:, :-1])
@@ -38,12 +44,11 @@ def train(model, train_data, optimizer, criterion, clip):
 
         loss = criterion(output_reshape, trg)
         loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), clip)
+        #nn.utils.clip_grad_norm_(model.parameters(), clip)
         optimizer.step()
 
         epoch_loss += loss.item()
         print('step :', round((i / train_data_len) * 100, 2), '% , loss :', loss.item())
-    print(i)
     return epoch_loss / train_data_len
 
 
@@ -51,10 +56,12 @@ def evaluate(model, iterator, criterion):
     model.eval()
     epoch_loss = 0
     batch_bleu = []
+    eval_data_len = (iterator.dataset.num_lines + iterator.batch_size -1) // iterator.batch_size
     with no_grad():
         for i, batch in enumerate(iterator):
-            src = batch.src
-            trg = batch.trg
+            src = batch[0].to(dv)
+            trg = batch[1].to(dv)
+
             output = model(src, trg[:, :-1])
             output_reshape = output.contiguous().view(-1, output.shape[-1])
             trg = trg[:, 1:].contiguous().view(-1)
@@ -63,9 +70,9 @@ def evaluate(model, iterator, criterion):
             epoch_loss += loss.item()
 
             total_bleu = []
-            for j in range(len(batch.trg)):
+            for j in range(len(batch[1])):
                 try:
-                    trg_words = dl.idx_to_word(batch.trg[j], source=False)
+                    trg_words = dl.idx_to_word(batch[1][j], source=False)
                     output_words = output[j].max(dim=1)[1]
                     output_words = dl.idx_to_word(output_words, source=False)
                     bleu = get_bleu(hypotheses=output_words.split(), reference=trg_words.split())
@@ -77,13 +84,13 @@ def evaluate(model, iterator, criterion):
             batch_bleu.append(total_bleu)
 
     batch_bleu = sum(batch_bleu) / len(batch_bleu)
-    return epoch_loss / len(iterator), batch_bleu
+    return epoch_loss / eval_data_len, batch_bleu
 
 
-def run(model, optimizer, scheduler, criterion, data, total_epoch, best_loss):
-    train_data, valid_data, _ = data 
+def run(model, optimizer, scheduler, criterion, dl, total_epoch, best_loss):
     train_losses, test_losses, bleus = [], [], []
     for step in range(total_epoch):
+        train_data, valid_data, _ = dl.datasets(batch=batch_size)
         start_time = time.time()
         train_loss = train(model, train_data, optimizer, criterion, clip)
         valid_loss, bleu = evaluate(model, valid_data, criterion)
@@ -114,9 +121,9 @@ def run(model, optimizer, scheduler, criterion, data, total_epoch, best_loss):
         f.close()
 
         print(f'Epoch: {step + 1} | Time: {epoch_mins}m {epoch_secs}s')
-        print(f'\tTrain Loss: {train_loss:.3f} | Train PPL: {math.exp(train_loss):7.3f}')
-        print(f'\tVal Loss: {valid_loss:.3f} |  Val PPL: {math.exp(valid_loss):7.3f}')
-        print(f'\tBLEU Score: {bleu:.3f}')
+        print(f'\tTrain Loss: {train_loss:.6f} | Train PPL: {math.exp(train_loss):7.6f}')
+        print(f'\tVal Loss: {valid_loss:.6f} |  Val PPL: {math.exp(valid_loss):7.6f}')
+        print(f'\tBLEU Score: {bleu:.6f}')
 
 if __name__ == "__main__":
     t = tranformer(
@@ -125,14 +132,19 @@ if __name__ == "__main__":
         source_vocab=source_size,
         target_vocab=target_size,
         padding_idx=padding_idx
-    )
+    ).to(dv)
+    t.apply(initialize_weights)
 
-    optimizer = optim.Adam(t.parameters(), lr=10e-10, weight_decay=weight_decay, eps=adam_eps)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer=optimizer,
-        verbose=True,
-        factor=factor,
-        patience=patience
-    )
+    optimizer = optim.Adam(params=t.parameters(),
+                            lr=init_lr,
+                            weight_decay=weight_decay,
+                            eps=adam_eps)
+
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
+                                                 verbose=True,
+                                                 factor=factor,
+                                                 patience=patience)
+
     criterion = nn.CrossEntropyLoss(ignore_index=padding_idx)
-    run(t, optimizer, scheduler, criterion, dl.datasets(batch=256), total_epoch=epoch, best_loss=float("inf"))
+
+    run(t, optimizer, scheduler, criterion, dl, total_epoch=epoch, best_loss=float("inf"))

@@ -1,8 +1,7 @@
-from torch import nn, matmul
-import torch
+from torch import nn, matmul, transpose, cat
 from math import sqrt
 
-class self_attention(nn.Module):
+class singlehead_attention(nn.Module):
     def __init__(self, d_model, d_k, d_v):
         super().__init__()
         self.d_k = d_k
@@ -20,7 +19,7 @@ class self_attention(nn.Module):
         projected_v = self.weight_v(v)
         
         # Calculate attention
-        score = matmul(projected_q, torch.transpose(projected_k, -2, -1)) / sqrt(self.d_v)
+        score = matmul(projected_q, transpose(projected_k, -2, -1)) / sqrt(self.d_v)
         if mask is not None:
             # Mask score
             score = score.masked_fill(mask, float("-Inf"))
@@ -37,12 +36,12 @@ class multihead_attention(nn.Module):
         self.h = h
 
         self.weight_o = nn.Linear(h*d_v, d_model)
-        self.attentions = [self_attention(d_model, d_k, d_v) for i in range(h)]
+        self.attentions = nn.ModuleList([singlehead_attention(d_model, d_k, d_v) for i in range(h)])
 
     def forward(self, q, k, v, mask=None):
-        attentions = [attention(q, k ,v, mask) for attention in self.attentions]
-        cat = torch.cat(attentions, dim=-1)
-        result = self.weight_o(cat)
+        attention_list = [attention(q, k ,v, mask) for attention in self.attentions]
+        attention = cat(attention_list, dim=-1)
+        result = self.weight_o(attention)
         return result
 
 if __name__ == "__main__":
@@ -51,6 +50,8 @@ if __name__ == "__main__":
     d_v = 6
     h = 16
     tokens = 250
+
+    import torch
 
     m = multihead_attention(d_model, d_k, d_v, h)
     q = torch.randn((tokens, d_model), dtype=torch.float32)

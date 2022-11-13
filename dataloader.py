@@ -1,10 +1,25 @@
-from collections import Counter
+from collections import Counter, OrderedDict
 from torchtext.datasets import Multi30k
 from torchtext.data.utils import get_tokenizer
-from torchtext.vocab import vocab
+from torchtext.vocab import build_vocab_from_iterator, vocab, Vocab
 from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 import torch
+
+def build_vocab_from_counter(counter: Counter, min_freq= 1, specials=None, special_first=True) -> Vocab:
+    sorted_by_freq_tuples = sorted(counter.items(), key=lambda x: x[0])
+    sorted_by_freq_tuples.sort(key=lambda x: x[1], reverse=True)
+    ordered_dict = OrderedDict(sorted_by_freq_tuples)
+
+    if specials is not None:
+        if special_first:
+            specials = specials[::-1]
+        for symbol in specials:
+            ordered_dict.update({symbol: min_freq})
+            ordered_dict.move_to_end(symbol, last=not special_first)
+
+    word_vocab = vocab(ordered_dict, min_freq=min_freq)
+    return word_vocab
 
 class dataloader():
     def __init__(self) -> None:
@@ -15,8 +30,8 @@ class dataloader():
 
     def datasets(self, batch=5, tokenize=True):
         multi_datapipes = Multi30k(language_pair=self.language_pair)
-        for datapipe in multi_datapipes:
-            datapipe.rows2columnar(self.language_pair)
+        #for datapipe in multi_datapipes:
+        #    datapipe.rows2columnar(self.language_pair)
 
         if tokenize:
             collect = self.generate_batch
@@ -26,15 +41,18 @@ class dataloader():
 
     def build_vocab(self):
         # Use train dataset to build vocab
-        multi_datapipe = self.datasets(batch=1, tokenize=False)[0]
+        multi_datapipe = self.datasets(batch=1, tokenize=False)
 
         source_counter = Counter()
         target_counter = Counter()
-        for source, target in multi_datapipe:
-            source_counter.update(self.source(source[0]))
-            target_counter.update(self.target(target[0]))
-        self.source_vocab = vocab(source_counter, specials=['<pad>', '<sos>', '<eos>'])
-        self.target_vocab = vocab(target_counter, specials=['<pad>', '<sos>', '<eos>'])
+        for datapipe in multi_datapipe:
+            for source, target in datapipe:
+                source_counter.update(self.source(source[0]))
+                target_counter.update(self.target(target[0]))
+        self.source_vocab = build_vocab_from_counter(source_counter, specials=['<pad>', '<sos>', '<eos>'])
+        self.target_vocab = build_vocab_from_counter(target_counter, specials=['<pad>', '<sos>', '<eos>'])
+        self.source_vocab.set_default_index(-1)
+        self.target_vocab.set_default_index(-1)
         return
 
     def generate_batch(self, data_batch):
@@ -50,9 +68,9 @@ class dataloader():
 
     def idx_to_word(self, x, source=True):
         words = []
-        vocab = self.source_vocab if source else self.target_vocab
+        selected_vocab = self.source_vocab if source else self.target_vocab
         for i in x:
-            word = vocab.itos[i]
+            word = selected_vocab.lookup_token(i)
             if '<' not in word:
                 words.append(word)
         words = " ".join(words)

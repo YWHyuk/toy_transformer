@@ -21,7 +21,7 @@ class feed_forward(nn.Module):
         if d_ff is None:
             d_ff = d_model*4
         self.linear1 = nn.Linear(d_model, d_ff)
-        self.activation = nn.ReLU()
+        self.activation = nn.ReLU(inplace=True)
         self.linear2 = nn.Linear(d_ff, d_model)
     
     def forward(self, x):
